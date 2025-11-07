@@ -61,16 +61,18 @@ class SelfConsistencySearch:
 
         self.temp_update_rule = temp_update_rule
         self.max_trials = max_trials
+        self.trials = 0
 
         self.score_aggregation = score_aggregation
 
-        self.return_all_steps = False
+        self.return_all_steps = True
 
         self.init_number_of_beams = 1
 
     def compute_step_scores(self, responses: list, prm_state):
-        responses = list(map(lambda x: x.replace('\n\n## Step', f'{self.prm.score_token}## Step'), responses))
-        return self.prm(responses, prm_state)
+        score_tok = getattr(self.prm, "score_token", None)
+        responses = [r.replace("\n\n## Step", f"{score_tok}## Step") for r in responses]
+        return self.prm(responses, prm_state, return_all_steps=self.return_all_steps)
 
     def _update_temperature(self):
         if self.temp_update_rule is None:
@@ -81,29 +83,30 @@ class SelfConsistencySearch:
             raise NotImplementedError()
 
     def __call__(self, question: str):
-        input_ids = self.generator.encode(question)
-        gen_state = self.generator.init_state(input_ids)
-        prm_state = self.prm.init_state(question)
+        input_ids_question = self.generator.encode(question)
+        gen_state_question = self.generator.init_state(input_ids_question)
+        prm_state_question = self.prm.init_state(question)
 
-        input_ids = input_ids.repeat(self.init_number_of_beams, 1)
-        gen_state = self.generator.inflate_state(gen_state, self.init_number_of_beams)
-        prm_state = self.prm.inflate_state(prm_state, self.init_number_of_beams)
+        input_ids_question = input_ids_question.repeat(self.init_number_of_beams, 1)
+        gen_state_question = self.generator.inflate_state(gen_state_question, self.init_number_of_beams)
+        prm_state_question = self.prm.inflate_state(prm_state_question, self.init_number_of_beams)
 
-        input_len = input_ids.shape[1]
+        input_len = input_ids_question.shape[1]
         complete_beams = defaultdict(list)
         
-        proposal_ids, proposal_logits, gen_state = self.generator(input_ids, gen_state)
+        proposal_ids, proposal_logits, gen_state = self.generator(input_ids_question, gen_state_question)
+        self.trials += 1
 
         proposal_response_ids = proposal_ids[:, input_len :]
         proposal_response_text = self.generator.tokenizer.batch_decode(proposal_response_ids)
       
-        proposal_scores, proposal_score_logits, prm_state = self.compute_step_scores(proposal_response_text, prm_state)
+        proposal_scores, proposal_score_logits, prm_state = self.compute_step_scores(proposal_response_text, prm_state_question)
 
         proposal_agg_scores = aggregate(proposal_scores, self.score_aggregation).item()
 
         is_complete = self.generator.is_complete(proposal_ids)
         if not is_complete[0]:
-            complete_beams['CaseType'].append('InitialIncompletion')
+            complete_beams['CaseType'].append('Candidates')
             complete_beams['answer'] = []
             complete_beams['aggregate_scores'] = []
             complete_beams['step_scores'] = []
@@ -118,19 +121,20 @@ class SelfConsistencySearch:
         trials = 0
         last_proposal_ids = proposal_ids.clone()
         best_score = proposal_agg_scores
-        logger.info(f'[SelfConsistency] Intial : {best_score:.4f}')
+        logger.info(f'[SelfConsistency] Intial {self.trials}/{self.max_trials} : {best_score:.4f}')
 
-        for trial_idx in range(self.max_trials):
+        for trial_idx in range(self.max_trials-1):
             self._update_temperature()
-            new_proposal_ids, new_proposal_logits, new_gen_state = self.generator(input_ids, gen_state)
+            new_proposal_ids, new_proposal_logits, new_gen_state = self.generator(input_ids_question, gen_state_question)
+            self.trials += 1
 
             new_proposal_respose_ids = new_proposal_ids[:, input_len :]
 
             new_proposal_response_text = self.generator.tokenizer.batch_decode(new_proposal_respose_ids)
-            new_proposal_scores, new_proposal_score_logits, prm_state = self.compute_step_scores(new_proposal_response_text, prm_state)
+            new_proposal_scores, new_proposal_score_logits, prm_state = self.compute_step_scores(new_proposal_response_text, prm_state_question)
             
             new_proposal_agg_scores = aggregate(new_proposal_scores, self.score_aggregation).item()
-            logger.info(f'[SelfConsistency] New score {trial_idx+1}/{self.max_trials} : {new_proposal_agg_scores:.4f}')
+            logger.info(f'[SelfConsistency] New score {self.trials}/{self.max_trials} : {new_proposal_agg_scores:.4f}')
 
             complete_beams['CaseType'].append('Candidates')
             complete_beams['answer'].append(new_proposal_response_text[0])

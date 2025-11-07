@@ -113,8 +113,8 @@ class GeneralPRM(BasePRM):
                 scores.append(probs)
             else:
                 scores.append(torch.min(probs))
-                
-        scores = torch.cat(scores)
+        # scores = torch.cat(scores)
+        scores = torch.stack(scores)
         return scores
 
     def init_state(
